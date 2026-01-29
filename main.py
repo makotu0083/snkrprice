@@ -2,7 +2,7 @@
 # GitHub Actions 用 Mercari Scraper
 #  - update=1 のみ
 #  - 新品・未使用
-#  - 販売中のみ（status == "on_sale"）
+#  - 販売中のみ（URLで status=on_sale）
 # =========================================================
 
 import os
@@ -48,9 +48,6 @@ SIZE_PATTERNS = [
     r"サイズ[：:\s]*([0-9]{2}\.?[0-9]?\s*cm)",
     r"\b([0-9]{2}\.?[0-9]?)\s*cm\b",
     r"\bUS\s*([0-9]{1,2}\.?[0-9]?)\b",
-    r"JAPAN\s*([0-9]{1,2}\.?[0-9]?)",
-    r"JP\s*([0-9]{1,2}\.?[0-9]?)",
-    r"([0-9]{2}\.?[0-9]?)(?:cm|CM)",
 ]
 
 # ===============================
@@ -64,12 +61,8 @@ def extract_item_candidates(data):
 
     for x in data.get("items", []):
         try:
-            # 新品・未使用
+            # 新品・未使用のみ
             if int(x.get("itemConditionId", -1)) != 1:
-                continue
-
-            # ★ 販売中のみ（これだけ見る）
-            if x.get("status") != "on_sale":
                 continue
 
             price = int(str(x.get("price")).replace(",", ""))
@@ -87,10 +80,14 @@ def extract_item_candidates(data):
     return items
 
 # ===============================
-# 検索 URL
+# 検索 URL（★販売中のみ）
 # ===============================
 def build_search_url(keyword: str) -> str:
-    return f"https://jp.mercari.com/search?keyword={quote(keyword)}"
+    return (
+        "https://jp.mercari.com/search"
+        f"?keyword={quote(keyword)}"
+        "&status=on_sale"
+    )
 
 # ===============================
 # 1キーワード処理
@@ -102,7 +99,6 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
         try:
             if "application/json" not in response.headers.get("content-type", ""):
                 return
-
             if "search" not in response.url:
                 return
 
@@ -139,7 +135,6 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
         html = await page.content()
         size = None
 
-        # __NEXT_DATA__ からサイズ取得
         m = re.search(r'<script id="__NEXT_DATA__".*?>(.*?)</script>', html, re.S)
         if m:
             try:
@@ -155,7 +150,6 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
             except Exception:
                 pass
 
-        # フォールバック
         if not size:
             text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
             for pat in SIZE_PATTERNS:
@@ -210,6 +204,7 @@ async def main():
         for r in targets:
             print(f"[START] {r['ID']} / {r['NAME']}")
             result = await fetch_cheapest_per_size(page, r["NAME"])
+            print(f"[INFO] size_count={len(result)}")
 
             for v in result.values():
                 rows_to_add.append([
