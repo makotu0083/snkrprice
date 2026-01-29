@@ -1,46 +1,35 @@
 name: Mercari Scraper
 
 on:
-  # 手動実行（テスト用）
   workflow_dispatch:
-
-  # 定期実行（毎日 朝6時 JST）
-  schedule:
-    - cron: "0 21 * * *" # UTC 21:00 = JST 6:00
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
 
-    timeout-minutes: 60
-
     steps:
-      # 1. リポジトリをチェックアウト
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Python セットアップ
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      # 3. 依存関係インストール
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4. Playwright Chromium インストール
-      - name: Install Playwright Chromium
+      - name: Install Playwright (with deps)
         run: |
-          playwright install chromium
-          playwright install-deps chromium
+          playwright install --with-deps chromium
 
-      # 5. スクレイパー実行
       - name: Run Mercari scraper
         env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          INPUT_GID: "0"
+          OUTPUT_GID: "777284074"
         run: |
           python main.py
