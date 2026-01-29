@@ -1,8 +1,8 @@
 # =========================================================
 # GitHub Actions 用 Mercari Scraper
-#  - input sheet の update=1 のみ処理
-#  - 対象IDの既存データのみ削除して再取得
-#  - Colab 版ロジック完全移植
+#  - update=1 のみ
+#  - 新品・未使用
+#  - 販売中のみ
 # =========================================================
 
 import os
@@ -18,7 +18,7 @@ from playwright.async_api import async_playwright, Page
 from bs4 import BeautifulSoup
 
 # ===============================
-# 環境変数（GitHub Actions）
+# 環境変数
 # ===============================
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
@@ -41,7 +41,7 @@ input_ws = sh.get_worksheet_by_id(INPUT_GID)
 output_ws = sh.get_worksheet_by_id(OUTPUT_GID)
 
 # ===============================
-# サイズ抽出パターン（Colab版同等）
+# サイズ抽出パターン
 # ===============================
 SIZE_PATTERNS = [
     r"表記サイズ[：:\s]*([0-9]{2}\.?[0-9]?\s*cm)",
@@ -50,32 +50,43 @@ SIZE_PATTERNS = [
     r"\bUS\s*([0-9]{1,2}\.?[0-9]?)\b",
     r"JAPAN\s*([0-9]{1,2}\.?[0-9]?)",
     r"JP\s*([0-9]{1,2}\.?[0-9]?)",
-    r"([0-9]{2}\.?[0-9]?)(?:cm|CM)",
 ]
 
 # ===============================
-# JSON から商品候補抽出（Colab完全互換）
+# 検索API → 商品候補抽出（販売中＋新品）
 # ===============================
 def extract_item_candidates(data):
     found = []
 
-    if isinstance(data, dict) and "items" in data:
-        for x in data["items"]:
-            try:
-                if int(x.get("itemConditionId", -1)) != 1:
-                    continue
+    if not isinstance(data, dict):
+        return found
 
-                price = int(str(x.get("price")).replace(",", ""))
-                item_id = x.get("id") or x.get("itemId")
-                if not item_id:
-                    continue
-
-                found.append({
-                    "id": item_id,
-                    "price": price,
-                })
-            except Exception:
+    for x in data.get("items", []):
+        try:
+            # 新品・未使用
+            if int(x.get("itemConditionId", -1)) != 1:
                 continue
+
+            # 販売中のみ
+            status = (
+                x.get("status")
+                or x.get("itemStatus")
+                or x.get("itemStatusId")
+            )
+            if status not in ("on_sale", "ON_SALE", 1):
+                continue
+
+            price = int(str(x.get("price")).replace(",", ""))
+            item_id = x.get("id") or x.get("itemId")
+            if not item_id:
+                continue
+
+            found.append({
+                "id": item_id,
+                "price": price,
+            })
+        except Exception:
+            continue
 
     return found
 
@@ -89,7 +100,7 @@ def build_search_url(keyword: str) -> str:
 # 1キーワード処理
 # ===============================
 async def fetch_cheapest_per_size(page: Page, keyword: str):
-    collected_items = []
+    collected = []
 
     async def handle_response(response):
         try:
@@ -103,9 +114,7 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
                 return
 
             data = json.loads(await response.text())
-            items = extract_item_candidates(data)
-            if items:
-                collected_items.extend(items)
+            collected.extend(extract_item_candidates(data))
         except Exception:
             pass
 
@@ -117,46 +126,44 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
         await page.mouse.wheel(0, 3000)
         await page.wait_for_timeout(1200)
 
-    await page.wait_for_timeout(3000)
-
-    uniq_items = {x["id"]: x for x in collected_items}.values()
+    uniq_items = {x["id"]: x for x in collected}.values()
     sorted_items = sorted(uniq_items, key=lambda x: x["price"])
 
-    cheapest_per_size = {}
+    cheapest = {}
 
     for item in sorted_items:
-        detail_url = f"https://jp.mercari.com/item/{item['id']}"
-
+        url = f"https://jp.mercari.com/item/{item['id']}"
         try:
-            await page.goto(detail_url, wait_until="domcontentloaded", timeout=120_000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=120_000)
             await page.wait_for_timeout(1500)
         except Exception:
             continue
 
         html = await page.content()
         size = None
+        on_sale = False
 
-        # __NEXT_DATA__ 優先
-        m = re.search(
-            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-            html,
-            re.S
-        )
+        # __NEXT_DATA__ 解析
+        m = re.search(r'<script id="__NEXT_DATA__".*?>(.*?)</script>', html, re.S)
         if m:
             try:
                 j = json.loads(m.group(1))
-                size = (
+                item_json = (
                     j.get("props", {})
                      .get("pageProps", {})
                      .get("item", {})
                      .get("item", {})
-                     .get("itemSize", {})
-                     .get("name")
                 )
+
+                # 念のため販売中再確認
+                if item_json.get("itemStatus") != "ON_SALE":
+                    continue
+
+                size = item_json.get("itemSize", {}).get("name")
             except Exception:
                 pass
 
-        # フォールバック（本文）
+        # フォールバック
         if not size:
             text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
             for pat in SIZE_PATTERNS:
@@ -168,14 +175,14 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
         if not size:
             continue
 
-        if size not in cheapest_per_size:
-            cheapest_per_size[size] = {
+        if size not in cheapest:
+            cheapest[size] = {
                 "size": size,
                 "price": item["price"],
-                "url": detail_url,
+                "url": url,
             }
 
-    return cheapest_per_size
+    return cheapest
 
 # ===============================
 # メイン処理
@@ -183,20 +190,17 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
 async def main():
     today = date.today().isoformat()
 
-    input_rows = input_ws.get_all_records()
-    targets = [r for r in input_rows if str(r.get("update", "")).strip() == "1"]
+    rows = input_ws.get_all_records()
+    targets = [r for r in rows if str(r.get("update", "")).strip() == "1"]
 
     print(f"[INFO] update=1 targets: {len(targets)}")
 
-    # 対象IDの既存データ削除
     delete_ids = {str(r["ID"]) for r in targets}
 
-    output_values = output_ws.get_all_values()
-    if output_values:
-        header = output_values[0]
-        body = output_values[1:]
+    output = output_ws.get_all_values()
+    if output:
+        header, body = output[0], output[1:]
         kept = [r for r in body if r and r[0] not in delete_ids]
-
         output_ws.clear()
         output_ws.append_row(header)
         if kept:
@@ -209,28 +213,28 @@ async def main():
         )
         page = await browser.new_page()
 
-        new_rows = []
+        rows_to_add = []
 
         for r in targets:
             print(f"[START] {r['ID']} / {r['NAME']}")
             result = await fetch_cheapest_per_size(page, r["NAME"])
 
-            for item in result.values():
-                new_rows.append([
+            for v in result.values():
+                rows_to_add.append([
                     r["ID"],
                     r["NAME"],
-                    item["size"],
+                    v["size"],
                     "ME",
-                    item["price"],
-                    item["url"],
+                    v["price"],
+                    v["url"],
                     today,
                 ])
 
         await browser.close()
 
-    if new_rows:
-        output_ws.append_rows(new_rows)
-        print(f"[DONE] appended {len(new_rows)} rows")
+    if rows_to_add:
+        output_ws.append_rows(rows_to_add)
+        print(f"[DONE] appended {len(rows_to_add)} rows")
     else:
         print("[DONE] no data")
 
