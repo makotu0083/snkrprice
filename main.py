@@ -2,7 +2,7 @@
 # GitHub Actions 用 Mercari Scraper
 #  - update=1 のみ
 #  - 新品・未使用
-#  - 販売中のみ
+#  - 販売中のみ（status == "on_sale"）
 # =========================================================
 
 import os
@@ -48,18 +48,16 @@ SIZE_PATTERNS = [
     r"サイズ[：:\s]*([0-9]{2}\.?[0-9]?\s*cm)",
     r"\b([0-9]{2}\.?[0-9]?)\s*cm\b",
     r"\bUS\s*([0-9]{1,2}\.?[0-9]?)\b",
-    r"JAPAN\s*([0-9]{1,2}\.?[0-9]?)",
-    r"JP\s*([0-9]{1,2}\.?[0-9]?)",
 ]
 
 # ===============================
-# 検索API → 商品候補抽出（販売中＋新品）
+# 検索API → 商品候補抽出
 # ===============================
 def extract_item_candidates(data):
-    found = []
+    items = []
 
     if not isinstance(data, dict):
-        return found
+        return items
 
     for x in data.get("items", []):
         try:
@@ -67,13 +65,8 @@ def extract_item_candidates(data):
             if int(x.get("itemConditionId", -1)) != 1:
                 continue
 
-            # 販売中のみ
-            status = (
-                x.get("status")
-                or x.get("itemStatus")
-                or x.get("itemStatusId")
-            )
-            if status not in ("on_sale"):
+            # ★ 販売中のみ（これだけ見る）
+            if x.get("status") != "on_sale":
                 continue
 
             price = int(str(x.get("price")).replace(",", ""))
@@ -81,14 +74,14 @@ def extract_item_candidates(data):
             if not item_id:
                 continue
 
-            found.append({
+            items.append({
                 "id": item_id,
                 "price": price,
             })
         except Exception:
             continue
 
-    return found
+    return items
 
 # ===============================
 # 検索 URL
@@ -107,10 +100,7 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
             if "application/json" not in response.headers.get("content-type", ""):
                 return
 
-            if not (
-                "entities:search" in response.url
-                or "search_items" in response.url
-            ):
+            if "search" not in response.url:
                 return
 
             data = json.loads(await response.text())
@@ -120,7 +110,11 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
 
     page.on("response", lambda r: asyncio.create_task(handle_response(r)))
 
-    await page.goto(build_search_url(keyword), wait_until="domcontentloaded", timeout=120_000)
+    await page.goto(
+        build_search_url(keyword),
+        wait_until="domcontentloaded",
+        timeout=120_000
+    )
 
     for _ in range(5):
         await page.mouse.wheel(0, 3000)
@@ -141,25 +135,20 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
 
         html = await page.content()
         size = None
-        on_sale = False
 
-        # __NEXT_DATA__ 解析
+        # __NEXT_DATA__ からサイズ取得
         m = re.search(r'<script id="__NEXT_DATA__".*?>(.*?)</script>', html, re.S)
         if m:
             try:
                 j = json.loads(m.group(1))
-                item_json = (
+                size = (
                     j.get("props", {})
                      .get("pageProps", {})
                      .get("item", {})
                      .get("item", {})
+                     .get("itemSize", {})
+                     .get("name")
                 )
-
-                # 念のため販売中再確認
-                if item_json.get("itemStatus") != "ON_SALE":
-                    continue
-
-                size = item_json.get("itemSize", {}).get("name")
             except Exception:
                 pass
 
