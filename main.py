@@ -15,10 +15,10 @@ from playwright.async_api import async_playwright, Page
 from bs4 import BeautifulSoup
 
 # ===============================
-# 環境変数
+# 環境変数（GitHub Actions）
 # ===============================
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
-GCP_SA_KEY = json.loads(os.environ["GCP_SA_KEY"])
+SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 
 INPUT_GID = 0
 OUTPUT_GID = 777284074
@@ -27,8 +27,11 @@ OUTPUT_GID = 777284074
 # Google Sheets 認証（Service Account）
 # ===============================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = Credentials.from_service_account_info(GCP_SA_KEY, scopes=SCOPES)
-gc = gspread.authorize(creds)
+credentials = Credentials.from_service_account_info(
+    SERVICE_ACCOUNT_INFO,
+    scopes=SCOPES
+)
+gc = gspread.authorize(credentials)
 
 sh = gc.open_by_url(SPREADSHEET_URL)
 input_ws = sh.get_worksheet_by_id(INPUT_GID)
@@ -100,6 +103,8 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
         html = await page.content()
 
         size = None
+
+        # __NEXT_DATA__ からサイズ取得
         m = re.search(r'<script id="__NEXT_DATA__".*?>(.*?)</script>', html, re.S)
         if m:
             try:
@@ -115,6 +120,7 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
             except Exception:
                 pass
 
+        # フォールバック（本文テキスト）
         if not size:
             text = BeautifulSoup(html, "html.parser").get_text()
             for pat in SIZE_PATTERNS:
@@ -150,6 +156,9 @@ async def main():
 
     # 既存出力削除（対象IDのみ）
     output = output_ws.get_all_values()
+    if not output:
+        return
+
     header, body = output[0], output[1:]
     kept = [r for r in body if r[0] not in delete_ids]
 
