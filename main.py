@@ -73,7 +73,7 @@ def extract_item_candidates(data):
                 or x.get("itemStatus")
                 or x.get("itemStatusId")
             )
-            if status not in ("on_sale", "ON_SALE", 1):
+            if status not in ("on_sale"):
                 continue
 
             price = int(str(x.get("price")).replace(",", ""))
