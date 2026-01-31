@@ -3,6 +3,7 @@
 #  - update=1 のみ
 #  - 新品・未使用
 #  - 販売中のみ（URLで status=on_sale）
+#  - size は数値のみで出力
 # =========================================================
 
 import os
@@ -51,6 +52,24 @@ SIZE_PATTERNS = [
 ]
 
 # ===============================
+# サイズ正規化（数値のみ）
+# ===============================
+def normalize_size(size_str: str) -> str | None:
+    """
+    "27cm" -> "27"
+    "27.5 cm" -> "27.5"
+    "US 9" -> "9"
+    """
+    if not size_str:
+        return None
+
+    m = re.search(r"([0-9]{1,2}(?:\.[0-9])?)", size_str)
+    if not m:
+        return None
+
+    return m.group(1)
+
+# ===============================
 # 検索API → 商品候補抽出
 # ===============================
 def extract_item_candidates(data):
@@ -80,7 +99,7 @@ def extract_item_candidates(data):
     return items
 
 # ===============================
-# 検索 URL（★販売中のみ）
+# 検索 URL（販売中のみ）
 # ===============================
 def build_search_url(keyword: str) -> str:
     return (
@@ -135,6 +154,7 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
         html = await page.content()
         size = None
 
+        # JSONからサイズ取得
         m = re.search(r'<script id="__NEXT_DATA__".*?>(.*?)</script>', html, re.S)
         if m:
             try:
@@ -150,6 +170,7 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
             except Exception:
                 pass
 
+        # テキストからサイズ取得
         if not size:
             text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
             for pat in SIZE_PATTERNS:
@@ -158,12 +179,14 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
                     size = m.group(1).strip()
                     break
 
-        if not size:
+        # ★ 数値のみへ正規化
+        normalized_size = normalize_size(size)
+        if not normalized_size:
             continue
 
-        if size not in cheapest:
-            cheapest[size] = {
-                "size": size,
+        if normalized_size not in cheapest:
+            cheapest[normalized_size] = {
+                "size": normalized_size,
                 "price": item["price"],
                 "url": url,
             }
@@ -183,6 +206,7 @@ async def main():
 
     delete_ids = {str(r["ID"]) for r in targets}
 
+    # 既存データ削除（対象IDのみ）
     output = output_ws.get_all_values()
     if output:
         header, body = output[0], output[1:]
@@ -210,7 +234,7 @@ async def main():
                 rows_to_add.append([
                     r["ID"],
                     r["NAME"],
-                    v["size"],
+                    v["size"],        # ← 数値のみ
                     "メルカリ",
                     v["price"],
                     v["url"],
