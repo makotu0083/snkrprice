@@ -37,6 +37,6 @@ jobs:
           SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           INPUT_GID: "0"
-          OUTPUT_GID: "777284074"
+          OUTPUT_GID: "208209208"
         run: |
           python main.py
