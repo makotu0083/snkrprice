@@ -25,7 +25,7 @@ SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 
 INPUT_GID = int(os.environ.get("INPUT_GID", 0))
-OUTPUT_GID = int(os.environ.get("OUTPUT_GID", 777284074))
+OUTPUT_GID = int(os.environ.get("OUTPUT_GID", 208209208))
 
 # ===============================
 # Google Sheets 認証
