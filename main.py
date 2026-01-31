@@ -10,7 +10,7 @@ import os
 import json
 import asyncio
 import re
-from datetime import date
+from datetime import datetime
 from urllib.parse import quote
 
 import gspread
@@ -197,7 +197,7 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
 # メイン処理
 # ===============================
 async def main():
-    today = date.today().isoformat()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     rows = input_ws.get_all_records()
     targets = [r for r in rows if str(r.get("update", "")).strip() == "1"]
@@ -238,7 +238,7 @@ async def main():
                     "メルカリ",
                     v["price"],
                     v["url"],
-                    today,
+                    now,
                 ])
 
         await browser.close()
