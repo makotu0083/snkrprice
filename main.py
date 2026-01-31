@@ -211,7 +211,7 @@ async def main():
                     r["ID"],
                     r["NAME"],
                     v["size"],
-                    "ME",
+                    "メルカリ",
                     v["price"],
                     v["url"],
                     today,
