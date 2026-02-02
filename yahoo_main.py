@@ -55,10 +55,38 @@ def generate_size_search_urls(keyword):
     }
 
 # ==================================================
+# Yahoo JSON items 抽出（耐性あり）
+# ==================================================
+def extract_items(data):
+    paths = [
+        lambda d: d["props"]["pageProps"]["searchResult"]["items"],
+        lambda d: d["props"]["initialState"]["search"]["results"]["items"],
+        lambda d: d["props"]["initialState"]["search"]["searchResult"]["items"],
+        lambda d: d["props"]["pageProps"]["dehydratedState"]["queries"][0]["state"]["data"]["items"],
+    ]
+
+    for getter in paths:
+        try:
+            items = getter(data)
+            if isinstance(items, list) and items:
+                return items
+        except Exception:
+            continue
+
+    return []
+
+# ==================================================
 # スクレイピング
 # ==================================================
 async def fetch_min_price(browser, size, url):
-    page = await browser.new_page()
+    page = await browser.new_page(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    )
+
     try:
         await page.goto(url, timeout=60000)
         await page.wait_for_load_state("networkidle")
@@ -70,13 +98,7 @@ async def fetch_min_price(browser, size, url):
         script = await page.locator("script#__NEXT_DATA__").inner_text()
         data = json.loads(script)
 
-        items = (
-            data.get("props", {})
-            .get("pageProps", {})
-            .get("searchResult", {})
-            .get("items", [])
-        )
-
+        items = extract_items(data)
         if not items:
             return size, None, None
 
@@ -110,16 +132,12 @@ async def run():
 
     # ---------- 出力シート安全初期化 ----------
     values = output_ws.get_all_values()
-
     if not values:
-        # シートが完全に空
         output_ws.append_row(HEADERS)
         existing = []
     elif len(values) == 1:
-        # ヘッダーのみ
         existing = []
     else:
-        # データあり
         existing = output_ws.get_all_records()
 
     row_map = {
