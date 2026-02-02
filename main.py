@@ -4,6 +4,7 @@
 #  - 新品・未使用
 #  - 販売中のみ（URLで status=on_sale）
 #  - size は数値のみで出力
+#  - URL に afid を付与
 # =========================================================
 
 import os
@@ -26,6 +27,8 @@ SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 
 INPUT_GID = int(os.environ.get("INPUT_GID", 0))
 OUTPUT_GID = int(os.environ.get("OUTPUT_GID", 208209208))
+
+AFID = "4997609843"  # ★ 固定 afid
 
 # ===============================
 # Google Sheets 認証
@@ -55,32 +58,21 @@ SIZE_PATTERNS = [
 # サイズ正規化（数値のみ）
 # ===============================
 def normalize_size(size_str: str) -> str | None:
-    """
-    "27cm" -> "27"
-    "27.5 cm" -> "27.5"
-    "US 9" -> "9"
-    """
     if not size_str:
         return None
-
     m = re.search(r"([0-9]{1,2}(?:\.[0-9])?)", size_str)
-    if not m:
-        return None
-
-    return m.group(1)
+    return m.group(1) if m else None
 
 # ===============================
 # 検索API → 商品候補抽出
 # ===============================
 def extract_item_candidates(data):
     items = []
-
     if not isinstance(data, dict):
         return items
 
     for x in data.get("items", []):
         try:
-            # 新品・未使用のみ
             if int(x.get("itemConditionId", -1)) != 1:
                 continue
 
@@ -144,9 +136,11 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
     cheapest = {}
 
     for item in sorted_items:
-        url = f"https://jp.mercari.com/item/{item['id']}"
+        base_url = f"https://jp.mercari.com/item/{item['id']}"
+        url = f"{base_url}?afid={AFID}"  # ★ afid 付き URL
+
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+            await page.goto(base_url, wait_until="domcontentloaded", timeout=120_000)
             await page.wait_for_timeout(1500)
         except Exception:
             continue
@@ -179,7 +173,6 @@ async def fetch_cheapest_per_size(page: Page, keyword: str):
                     size = m.group(1).strip()
                     break
 
-        # ★ 数値のみへ正規化
         normalized_size = normalize_size(size)
         if not normalized_size:
             continue
@@ -206,7 +199,6 @@ async def main():
 
     delete_ids = {str(r["ID"]) for r in targets}
 
-    # 既存データ削除（対象IDのみ）
     output = output_ws.get_all_values()
     if output:
         header, body = output[0], output[1:]
@@ -234,10 +226,10 @@ async def main():
                 rows_to_add.append([
                     r["ID"],
                     r["NAME"],
-                    v["size"],        # ← 数値のみ
+                    v["size"],
                     "メルカリ",
                     v["price"],
-                    v["url"],
+                    v["url"],  # ← afid 付き
                     now,
                 ])
 
