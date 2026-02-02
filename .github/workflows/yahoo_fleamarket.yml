@@ -2,7 +2,7 @@ name: Yahoo FleaMarket Scraper
 
 on:
   schedule:
-    - cron: "0 * * * *"   # 毎時
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -10,19 +10,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libxcomposite1 \
+            libxrandr2 \
+            libgbm1 \
+            libpango-1.0-0 \
+            libpangocairo-1.0-0 \
+            libasound2t64 \
+            libgtk-3-0
+
+      - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
           playwright install chromium
-          playwright install-deps
 
       - name: Run Yahoo scraper
         env:
