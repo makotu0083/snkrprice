@@ -108,11 +108,18 @@ async def run():
         if row.get("ID") and row.get("NAME")
     }
 
-    # 出力シート初期化
-    if not output_ws.get_all_values():
+    # ---------- 出力シート安全初期化 ----------
+    values = output_ws.get_all_values()
+
+    if not values:
+        # シートが完全に空
         output_ws.append_row(HEADERS)
         existing = []
+    elif len(values) == 1:
+        # ヘッダーのみ
+        existing = []
     else:
+        # データあり
         existing = output_ws.get_all_records()
 
     row_map = {
@@ -120,6 +127,7 @@ async def run():
         for idx, r in enumerate(existing)
     }
 
+    # ---------- Playwright ----------
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
