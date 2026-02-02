@@ -8,9 +8,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import os
 
-# =============================
+# ==================================================
 # 定数
-# =============================
+# ==================================================
 SIZE_SPECS_MAP = {
     "23cm": 236665, "23.5cm": 236666, "24cm": 236667, "24.5cm": 236668,
     "25cm": 236669, "25.5cm": 236670, "26cm": 236671, "26.5cm": 236672,
@@ -25,9 +25,11 @@ NO_RESULT_TEXT = "に一致する商品はありません。"
 INPUT_SHEET_GID = 0
 OUTPUT_SHEET_GID = 1994370799
 
-# =============================
+HEADERS = ["ID", "NAME", "size", "site", "price", "url", "updated_at"]
+
+# ==================================================
 # Google Sheets 認証
-# =============================
+# ==================================================
 creds_dict = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 creds = Credentials.from_service_account_info(
     creds_dict,
@@ -36,25 +38,25 @@ creds = Credentials.from_service_account_info(
 gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
-# =============================
+# ==================================================
 # URL生成
-# =============================
+# ==================================================
 def generate_size_search_urls(keyword):
     encoded = urllib.parse.quote(keyword)
-    urls = {}
-    for size, value_id in SIZE_SPECS_MAP.items():
-        urls[size] = (
+    return {
+        size: (
             f"{BASE_URL}/{encoded}"
             f"?sort=price&order=asc"
             f"&specs=C_{FACET_ID}%3A{value_id}"
             f"&conditions=NEW"
             f"&open=1"
         )
-    return urls
+        for size, value_id in SIZE_SPECS_MAP.items()
+    }
 
-# =============================
+# ==================================================
 # スクレイピング
-# =============================
+# ==================================================
 async def fetch_min_price(browser, size, url):
     page = await browser.new_page()
     try:
@@ -79,7 +81,11 @@ async def fetch_min_price(browser, size, url):
             return size, None, None
 
         item = items[0]
-        return size, item["price"], f"https://paypayfleamarket.yahoo.co.jp/item/{item['id']}"
+        return (
+            size,
+            item.get("price"),
+            f"https://paypayfleamarket.yahoo.co.jp/item/{item.get('id')}",
+        )
 
     except Exception as e:
         print(f"[ERROR] {size}: {e}")
@@ -87,17 +93,28 @@ async def fetch_min_price(browser, size, url):
     finally:
         await page.close()
 
-# =============================
+# ==================================================
 # メイン処理
-# =============================
+# ==================================================
 async def run():
     input_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
     output_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(OUTPUT_SHEET_GID)
 
+    # 入力（ID / NAME）
     input_rows = input_ws.get_all_records()
-    id_name_map = {row["NAME"]: row["ID"] for row in input_rows if row.get("NAME")}
+    id_name_map = {
+        row["NAME"]: row["ID"]
+        for row in input_rows
+        if row.get("ID") and row.get("NAME")
+    }
 
-    existing = output_ws.get_all_records()
+    # 出力シート初期化
+    if not output_ws.get_all_values():
+        output_ws.append_row(HEADERS)
+        existing = []
+    else:
+        existing = output_ws.get_all_records()
+
     row_map = {
         (r["ID"], r["size"], r["site"]): idx + 2
         for idx, r in enumerate(existing)
@@ -115,13 +132,14 @@ async def run():
 
         try:
             for keyword, product_id in id_name_map.items():
-                print(f"=== {keyword} ===")
+                print(f"========== {keyword} ==========")
                 urls = generate_size_search_urls(keyword)
 
                 for size, url in urls.items():
                     size, price, item_url = await fetch_min_price(browser, size, url)
+
                     site = "YA"
-                    today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                     values = [
                         product_id,
@@ -130,21 +148,26 @@ async def run():
                         site,
                         price or 0,
                         item_url or "",
-                        today,
+                        now,
                     ]
 
                     key = (product_id, size, site)
                     if key in row_map:
-                        output_ws.update(f"A{row_map[key]}:G{row_map[key]}", [values])
+                        output_ws.update(
+                            f"A{row_map[key]}:G{row_map[key]}",
+                            [values],
+                            value_input_option="USER_ENTERED",
+                        )
                         print(f"更新 {size} ¥{price}")
                     else:
-                        output_ws.append_row(values)
+                        output_ws.append_row(values, value_input_option="USER_ENTERED")
                         print(f"追加 {size} ¥{price}")
+
         finally:
             await browser.close()
 
-# =============================
+# ==================================================
 # 実行
-# =============================
+# ==================================================
 if __name__ == "__main__":
     asyncio.run(run())
