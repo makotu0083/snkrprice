@@ -2,7 +2,9 @@ import requests
 import json
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime
 import os
+import time
 
 # ==================================================
 # 定数
@@ -16,9 +18,20 @@ SIZE_SPECS_MAP = {
 }
 
 FACET_ID = 27435
-API_BASE = "https://paypayfleamarket.yahoo.co.jp/api/v1/search"
+
+SEARCH_API = "https://paypayfleamarket.yahoo.co.jp/api/v1/search"
+DETAIL_API = "https://paypayfleamarket.yahoo.co.jp/api/v1/item/{}"
 
 INPUT_SHEET_GID = 0
+OUTPUT_SHEET_GID = 1994370799
+
+HEADERS = ["ID", "NAME", "size", "site", "price", "url", "updated_at"]
+
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 # ==================================================
 # Google Sheets 認証
@@ -32,73 +45,145 @@ gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
-# search API 生ログ取得（調査用）
+# 判定系（detail API 専用）
 # ==================================================
-def fetch_min_price_debug(keyword, size, size_id):
+def is_on_sale(detail: dict) -> bool:
+    if detail.get("itemStatus") == "OPEN":
+        return True
+    if detail.get("isSoldOut") is False:
+        return True
+    return False
+
+
+def is_unused(detail: dict) -> bool:
+    cond = str(detail.get("condition") or "").lower()
+    return cond.startswith("new") or "unused" in cond or "未使用" in cond
+
+
+def has_size(detail: dict, size_value_id: int) -> bool:
+    specs = detail.get("specs") or []
+    for sp in specs:
+        fid = sp.get("facetId")
+        vid = sp.get("valueId")
+        if fid == FACET_ID and vid == size_value_id:
+            return True
+    return False
+
+# ==================================================
+# search → detail で最安取得
+# ==================================================
+def fetch_min_price(keyword, size, size_id):
+    # --- Step1: search API ---
     params = {
         "query": keyword,
         "sort": "price",
         "order": "asc",
-        "open": 1,
-        "conditions": "NEW",
         "page": 1,
-        "limit": 5,  # 調査なので少数
+        "limit": 50,
     }
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": UA,
         "Accept": "application/json",
-        "Accept-Language": "ja-JP,ja;q=0.9",
         "Referer": "https://paypayfleamarket.yahoo.co.jp/",
     }
 
-    r = requests.get(API_BASE, params=params, headers=headers, timeout=20)
+    r = requests.get(SEARCH_API, params=params, headers=headers, timeout=20)
+    if r.status_code != 200:
+        return None, None
 
-    print("\n[DBG] ===== search API raw response =====")
-    print("[DBG] status:", r.status_code)
-    print("[DBG] request_url:", r.url)
+    items = r.json().get("items", []) or []
 
-    try:
-        data = r.json()
-    except Exception as e:
-        print("[DBG] JSON decode error:", e)
-        print("[DBG] raw text:", r.text[:500])
-        return
+    # --- Step2: detail API ---
+    for item in items:
+        item_id = item.get("id")
+        if not item_id:
+            continue
 
-    items = data.get("items", []) or []
+        dr = requests.get(
+            DETAIL_API.format(item_id),
+            headers=headers,
+            timeout=20,
+        )
+        if dr.status_code != 200:
+            continue
 
-    print("[DBG] items_len:", len(items))
+        detail = dr.json()
 
-    if not items:
-        print("[DBG] items is EMPTY")
-        return
+        if not is_on_sale(detail):
+            continue
+        if not is_unused(detail):
+            continue
+        if not has_size(detail, size_id):
+            continue
 
-    # item[0] を丸裸で出す（最重要）
-    print("[DBG] raw item[0]:")
-    print(json.dumps(items[0], ensure_ascii=False, indent=2))
+        price = detail.get("price")
+        if price is None:
+            continue
+
+        url = f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}"
+        return price, url
+
+    return None, None
 
 # ==================================================
-# メイン処理（調査用）
+# メイン処理
 # ==================================================
 def run():
     input_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
+    output_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(OUTPUT_SHEET_GID)
+
     input_rows = input_ws.get_all_records()
+    id_name_map = {
+        row["NAME"]: row["ID"]
+        for row in input_rows
+        if row.get("ID") and row.get("NAME")
+    }
 
-    # 1商品だけでOK
-    for row in input_rows:
-        keyword = row.get("NAME")
-        if not keyword:
-            continue
+    values = output_ws.get_all_values()
+    if not values:
+        output_ws.append_row(HEADERS)
+        existing = []
+    elif len(values) == 1:
+        existing = []
+    else:
+        existing = output_ws.get_all_records()
 
-        print(f"\n========== DEBUG TARGET: {keyword} ==========")
+    row_map = {
+        (r["ID"], r["size"], r["site"]): idx + 2
+        for idx, r in enumerate(existing)
+    }
 
-        # 27cm だけ調査
-        fetch_min_price_debug(keyword, "27cm", SIZE_SPECS_MAP["27cm"])
-        break  # ★ 1商品で終了
+    for keyword, product_id in id_name_map.items():
+        print(f"========== {keyword} ==========")
+
+        for size, size_id in SIZE_SPECS_MAP.items():
+            price, url = fetch_min_price(keyword, size, size_id)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            values = [
+                product_id,
+                keyword,
+                size,
+                "YA",
+                price or 0,
+                url or "",
+                now,
+            ]
+
+            key = (product_id, size, "YA")
+            if key in row_map:
+                output_ws.update(
+                    f"A{row_map[key]}:G{row_map[key]}",
+                    [values],
+                    value_input_option="USER_ENTERED",
+                )
+                print(f"更新 {size} ¥{price}")
+            else:
+                output_ws.append_row(values, value_input_option="USER_ENTERED")
+                print(f"追加 {size} ¥{price}")
+
+            time.sleep(0.4)  # detail API連打防止
 
 # ==================================================
 # 実行
