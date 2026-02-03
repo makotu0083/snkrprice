@@ -86,34 +86,54 @@ async def fetch_min_price(browser, size, url):
             "Chrome/120.0.0.0 Safari/537.36"
         )
     )
-
     try:
-        await page.goto(url, timeout=60000)
-        await page.wait_for_load_state("networkidle")
+        resp = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        status = resp.status if resp else None
+        title = await page.title()
 
-        soup = BeautifulSoup(await page.content(), "html.parser")
-        if NO_RESULT_TEXT in soup.text:
+        has_next = await page.locator("script#__NEXT_DATA__").count()
+
+        if size == "27cm":
+            print(f"[DBG] status={status} title={title} has_NEXT_DATA={has_next}")
+            print("[DBG] sample_url:", url)
+
+        # networkidleが怪しいので短い待機に変更（検証用）
+        await page.wait_for_timeout(1500)
+
+        html = await page.content()
+        bot_flag = any(w in html.lower() for w in ["captcha", "robot", "verify", "access denied"])
+        if size == "27cm":
+            print("[DBG] bot_flag=", bot_flag)
+            print("[DBG] html_head:", html[:250].replace("\n", " "))
+
+        if has_next == 0:
             return size, None, None
 
         script = await page.locator("script#__NEXT_DATA__").inner_text()
         data = json.loads(script)
 
         items = extract_items(data)
+        if not items and size == "27cm":
+            root_keys = list(data.keys())
+            props_keys = list(data.get("props", {}).keys())
+            print("[DBG] no_items root_keys=", root_keys, " props_keys=", props_keys)
+            ds = data.get("props", {}).get("pageProps", {}).get("dehydratedState")
+            if ds and "queries" in ds:
+                print("[DBG] dehydratedState.queries len=", len(ds["queries"]))
+
         if not items:
             return size, None, None
 
         item = items[0]
-        return (
-            size,
-            item.get("price"),
-            f"https://paypayfleamarket.yahoo.co.jp/item/{item.get('id')}",
-        )
+        return size, item.get("price"), f"https://paypayfleamarket.yahoo.co.jp/item/{item.get('id')}"
 
     except Exception as e:
-        print(f"[ERROR] {size}: {e}")
+        if size == "27cm":
+            print(f"[DBG][ERROR] {e}")
         return size, None, None
     finally:
         await page.close()
+
 
 # ==================================================
 # メイン処理
