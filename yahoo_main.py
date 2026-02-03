@@ -1,12 +1,11 @@
+import requests
 import urllib.parse
-import json
-import asyncio
-from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 from datetime import datetime
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 import os
+import time
 
 # ==================================================
 # 定数
@@ -18,9 +17,9 @@ SIZE_SPECS_MAP = {
     "29cm": 236677, "29.5cm": 236678, "30cm": 236679, "30.5cm": 260922,
     "31cm": 260923, "31.5cm": 260924, "32cm": 260925,
 }
+
 FACET_ID = 27435
-BASE_URL = "https://paypayfleamarket.yahoo.co.jp/search"
-NO_RESULT_TEXT = "に一致する商品はありません。"
+API_BASE = "https://paypayfleamarket.yahoo.co.jp/api/v1/search"
 
 INPUT_SHEET_GID = 0
 OUTPUT_SHEET_GID = 1994370799
@@ -39,110 +38,53 @@ gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
-# URL生成
+# Yahoo API 取得
 # ==================================================
-def generate_size_search_urls(keyword):
-    encoded = urllib.parse.quote(keyword)
-    return {
-        size: (
-            f"{BASE_URL}/{encoded}"
-            f"?sort=price&order=asc"
-            f"&specs=C_{FACET_ID}%3A{value_id}"
-            f"&conditions=NEW"
-            f"&open=1"
-        )
-        for size, value_id in SIZE_SPECS_MAP.items()
+def fetch_min_price(keyword, size, size_id):
+    params = {
+        "query": keyword,
+        "sort": "price",
+        "order": "asc",
+        "conditions": "NEW",
+        "specs": f"C_{FACET_ID}:{size_id}",
+        "page": 1,
+        "limit": 1,
     }
 
-# ==================================================
-# Yahoo JSON items 抽出（耐性あり）
-# ==================================================
-def extract_items(data):
-    paths = [
-        lambda d: d["props"]["pageProps"]["searchResult"]["items"],
-        lambda d: d["props"]["initialState"]["search"]["results"]["items"],
-        lambda d: d["props"]["initialState"]["search"]["searchResult"]["items"],
-        lambda d: d["props"]["pageProps"]["dehydratedState"]["queries"][0]["state"]["data"]["items"],
-    ]
-
-    for getter in paths:
-        try:
-            items = getter(data)
-            if isinstance(items, list) and items:
-                return items
-        except Exception:
-            continue
-
-    return []
-
-# ==================================================
-# スクレイピング
-# ==================================================
-async def fetch_min_price(browser, size, url):
-    page = await browser.new_page(
-        user_agent=(
+    headers = {
+        "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
-        )
-    )
+        ),
+        "Accept": "application/json",
+    }
+
     try:
-        resp = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-        status = resp.status if resp else None
-        title = await page.title()
+        r = requests.get(API_BASE, params=params, headers=headers, timeout=20)
+        if r.status_code != 200:
+            return None, None
 
-        has_next = await page.locator("script#__NEXT_DATA__").count()
-
-        if size == "27cm":
-            print(f"[DBG] status={status} title={title} has_NEXT_DATA={has_next}")
-            print("[DBG] sample_url:", url)
-
-        # networkidleが怪しいので短い待機に変更（検証用）
-        await page.wait_for_timeout(1500)
-
-        html = await page.content()
-        bot_flag = any(w in html.lower() for w in ["captcha", "robot", "verify", "access denied"])
-        if size == "27cm":
-            print("[DBG] bot_flag=", bot_flag)
-            print("[DBG] html_head:", html[:250].replace("\n", " "))
-
-        if has_next == 0:
-            return size, None, None
-
-        script = await page.locator("script#__NEXT_DATA__").inner_text()
-        data = json.loads(script)
-
-        items = extract_items(data)
-        if not items and size == "27cm":
-            root_keys = list(data.keys())
-            props_keys = list(data.get("props", {}).keys())
-            print("[DBG] no_items root_keys=", root_keys, " props_keys=", props_keys)
-            ds = data.get("props", {}).get("pageProps", {}).get("dehydratedState")
-            if ds and "queries" in ds:
-                print("[DBG] dehydratedState.queries len=", len(ds["queries"]))
+        data = r.json()
+        items = data.get("items", [])
 
         if not items:
-            return size, None, None
+            return None, None
 
         item = items[0]
-        return size, item.get("price"), f"https://paypayfleamarket.yahoo.co.jp/item/{item.get('id')}"
+        return item.get("price"), f"https://paypayfleamarket.yahoo.co.jp/item/{item.get('id')}"
 
     except Exception as e:
-        if size == "27cm":
-            print(f"[DBG][ERROR] {e}")
-        return size, None, None
-    finally:
-        await page.close()
-
+        print(f"[ERROR] {keyword} {size}: {e}")
+        return None, None
 
 # ==================================================
 # メイン処理
 # ==================================================
-async def run():
+def run():
     input_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
     output_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(OUTPUT_SHEET_GID)
 
-    # 入力（ID / NAME）
     input_rows = input_ws.get_all_records()
     id_name_map = {
         row["NAME"]: row["ID"]
@@ -150,7 +92,6 @@ async def run():
         if row.get("ID") and row.get("NAME")
     }
 
-    # ---------- 出力シート安全初期化 ----------
     values = output_ws.get_all_values()
     if not values:
         output_ws.append_row(HEADERS)
@@ -165,55 +106,39 @@ async def run():
         for idx, r in enumerate(existing)
     }
 
-    # ---------- Playwright ----------
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
+    for keyword, product_id in id_name_map.items():
+        print(f"========== {keyword} ==========")
 
-        try:
-            for keyword, product_id in id_name_map.items():
-                print(f"========== {keyword} ==========")
-                urls = generate_size_search_urls(keyword)
+        for size, size_id in SIZE_SPECS_MAP.items():
+            price, url = fetch_min_price(keyword, size, size_id)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                for size, url in urls.items():
-                    size, price, item_url = await fetch_min_price(browser, size, url)
+            values = [
+                product_id,
+                keyword,
+                size,
+                "YA",
+                price or 0,
+                url or "",
+                now,
+            ]
 
-                    site = "YA"
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            key = (product_id, size, "YA")
+            if key in row_map:
+                output_ws.update(
+                    f"A{row_map[key]}:G{row_map[key]}",
+                    [values],
+                    value_input_option="USER_ENTERED",
+                )
+                print(f"更新 {size} ¥{price}")
+            else:
+                output_ws.append_row(values, value_input_option="USER_ENTERED")
+                print(f"追加 {size} ¥{price}")
 
-                    values = [
-                        product_id,
-                        keyword,
-                        size,
-                        site,
-                        price or 0,
-                        item_url or "",
-                        now,
-                    ]
-
-                    key = (product_id, size, site)
-                    if key in row_map:
-                        output_ws.update(
-                            f"A{row_map[key]}:G{row_map[key]}",
-                            [values],
-                            value_input_option="USER_ENTERED",
-                        )
-                        print(f"更新 {size} ¥{price}")
-                    else:
-                        output_ws.append_row(values, value_input_option="USER_ENTERED")
-                        print(f"追加 {size} ¥{price}")
-
-        finally:
-            await browser.close()
+            time.sleep(0.3)  # 念のためのレート制御
 
 # ==================================================
 # 実行
 # ==================================================
 if __name__ == "__main__":
-    asyncio.run(run())
+    run()
