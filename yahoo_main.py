@@ -40,7 +40,38 @@ gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
-# Yahoo UI（__NEXT_DATA__）から最安取得
+# UI（__NEXT_DATA__）から items を安全に取得
+# ==================================================
+def extract_items_from_next_data(data: dict):
+    """
+    UIの揺れに対応：pageProps.searchResult / initialState 両対応
+    """
+    # 1) pageProps -> searchResult
+    items = (
+        data.get("props", {})
+            .get("pageProps", {})
+            .get("searchResult", {})
+            .get("items")
+    )
+    if isinstance(items, list) and items:
+        return items
+
+    # 2) initialState -> searchState
+    items = (
+        data.get("props", {})
+            .get("initialState", {})
+            .get("searchState", {})
+            .get("search", {})
+            .get("result", {})
+            .get("items")
+    )
+    if isinstance(items, list) and items:
+        return items
+
+    return []
+
+# ==================================================
+# Yahoo UI（__NEXT_DATA__）から最安取得（安定版）
 # ==================================================
 async def fetch_min_price_ui(browser, keyword, size, size_id, debug=False):
     encoded = quote(keyword)
@@ -54,31 +85,45 @@ async def fetch_min_price_ui(browser, keyword, size, size_id, debug=False):
 
     page = await browser.new_page()
     try:
+        # まずページ遷移
         await page.goto(url, timeout=60000)
-        await page.wait_for_load_state("networkidle")
 
-        html = await page.content()
-        soup = BeautifulSoup(html, "html.parser")
+        # __NEXT_DATA__ の script 出現を待つ（描画完了ではない）
+        await page.wait_for_selector("script#__NEXT_DATA__", timeout=60000)
 
-        script = soup.find("script", id="__NEXT_DATA__")
-        if not script:
+        items = []
+        last_keys = None
+
+        # ★ 重要：items が入るまで最大10回ポーリング
+        for _ in range(10):
+            html = await page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            script = soup.find("script", id="__NEXT_DATA__")
+            if not script or not script.string:
+                await asyncio.sleep(0.5)
+                continue
+
+            data = json.loads(script.string)
+
             if debug:
-                print(f"[DBG] __NEXT_DATA__ not found: {size}")
-            return None, None
+                last_keys = (
+                    list(data.get("props", {}).keys()),
+                    list(data.get("props", {}).get("pageProps", {}).keys()),
+                )
 
-        data = json.loads(script.string)
+            items = extract_items_from_next_data(data)
+            if items:
+                break
 
-        # UI側で既にフィルタ済みの検索結果
-        items = (
-            data.get("props", {})
-                .get("pageProps", {})
-                .get("searchResult", {})
-                .get("items", [])
-        )
+            await asyncio.sleep(0.5)
+
+        if debug:
+            print(f"[DBG] size={size} items_len={len(items)} keys={last_keys}")
 
         if not items:
             return None, None
 
+        # UI側で既に size / 未使用 / 販売中 が反映済み
         item = items[0]
         price = item.get("price")
         item_id = item.get("id")
@@ -140,7 +185,7 @@ async def run():
 
                 for size, size_id in SIZE_SPECS_MAP.items():
                     price, url = await fetch_min_price_ui(
-                        browser, keyword, size, size_id
+                        browser, keyword, size, size_id, debug=True
                     )
 
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
