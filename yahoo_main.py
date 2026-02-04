@@ -2,9 +2,7 @@ import requests
 import json
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
 import os
-import time
 
 # ==================================================
 # 定数
@@ -18,14 +16,9 @@ SIZE_SPECS_MAP = {
 }
 
 FACET_ID = 27435
-
 SEARCH_API = "https://paypayfleamarket.yahoo.co.jp/api/v1/search"
-DETAIL_API = "https://paypayfleamarket.yahoo.co.jp/api/v1/item/{}"
 
 INPUT_SHEET_GID = 0
-OUTPUT_SHEET_GID = 1994370799
-
-HEADERS = ["ID", "NAME", "size", "site", "price", "url", "updated_at"]
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -34,7 +27,7 @@ UA = (
 )
 
 # ==================================================
-# Google Sheets 認証
+# Google Sheets 認証（キーワード取得のみ）
 # ==================================================
 creds_dict = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 creds = Credentials.from_service_account_info(
@@ -45,145 +38,71 @@ gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
-# 判定系（detail API 専用）
+# サイズ指定 search API デバッグ
 # ==================================================
-def is_on_sale(detail: dict) -> bool:
-    if detail.get("itemStatus") == "OPEN":
-        return True
-    if detail.get("isSoldOut") is False:
-        return True
-    return False
-
-
-def is_unused(detail: dict) -> bool:
-    cond = str(detail.get("condition") or "").lower()
-    return cond.startswith("new") or "unused" in cond or "未使用" in cond
-
-
-def has_size(detail: dict, size_value_id: int) -> bool:
-    specs = detail.get("specs") or []
-    for sp in specs:
-        fid = sp.get("facetId")
-        vid = sp.get("valueId")
-        if fid == FACET_ID and vid == size_value_id:
-            return True
-    return False
-
-# ==================================================
-# search → detail で最安取得
-# ==================================================
-def fetch_min_price(keyword, size, size_id):
-    # --- Step1: search API ---
+def search_with_size_debug(keyword, size, size_id):
     params = {
         "query": keyword,
         "sort": "price",
         "order": "asc",
+        # ★ Web検索URLと同じ指定
+        "specs": f"C_{FACET_ID}:{size_id}",
+        "open": 1,
         "page": 1,
-        "limit": 50,
+        "limit": 10,  # デバッグなので少なめ
     }
 
     headers = {
         "User-Agent": UA,
         "Accept": "application/json",
+        "Accept-Language": "ja-JP,ja;q=0.9",
         "Referer": "https://paypayfleamarket.yahoo.co.jp/",
     }
 
     r = requests.get(SEARCH_API, params=params, headers=headers, timeout=20)
-    if r.status_code != 200:
-        return None, None
 
-    items = r.json().get("items", []) or []
+    print("\n[DBG] ===== SIZE SEARCH DEBUG =====")
+    print("[DBG] keyword:", keyword)
+    print("[DBG] size:", size)
+    print("[DBG] request_url:", r.url)
+    print("[DBG] status:", r.status_code)
 
-    # --- Step2: detail API ---
-    for item in items:
-        item_id = item.get("id")
-        if not item_id:
-            continue
+    try:
+        data = r.json()
+    except Exception as e:
+        print("[DBG] JSON decode error:", e)
+        print("[DBG] raw text:", r.text[:500])
+        return
 
-        dr = requests.get(
-            DETAIL_API.format(item_id),
-            headers=headers,
-            timeout=20,
-        )
-        if dr.status_code != 200:
-            continue
+    items = data.get("items", []) or []
+    print("[DBG] items_len:", len(items))
 
-        detail = dr.json()
+    if not items:
+        print("[DBG] items is EMPTY")
+        return
 
-        if not is_on_sale(detail):
-            continue
-        if not is_unused(detail):
-            continue
-        if not has_size(detail, size_id):
-            continue
-
-        price = detail.get("price")
-        if price is None:
-            continue
-
-        url = f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}"
-        return price, url
-
-    return None, None
+    # 先頭2件だけ中身を確認
+    for i, item in enumerate(items[:2]):
+        print(f"\n[DBG] raw item[{i}]:")
+        print(json.dumps(item, ensure_ascii=False, indent=2))
 
 # ==================================================
-# メイン処理
+# メイン（1キーワード・27cmのみ）
 # ==================================================
 def run():
     input_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
-    output_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(OUTPUT_SHEET_GID)
+    rows = input_ws.get_all_records()
 
-    input_rows = input_ws.get_all_records()
-    id_name_map = {
-        row["NAME"]: row["ID"]
-        for row in input_rows
-        if row.get("ID") and row.get("NAME")
-    }
+    for row in rows:
+        keyword = row.get("NAME")
+        if not keyword:
+            continue
 
-    values = output_ws.get_all_values()
-    if not values:
-        output_ws.append_row(HEADERS)
-        existing = []
-    elif len(values) == 1:
-        existing = []
-    else:
-        existing = output_ws.get_all_records()
+        print(f"\n========== DEBUG TARGET: {keyword} ==========")
 
-    row_map = {
-        (r["ID"], r["size"], r["site"]): idx + 2
-        for idx, r in enumerate(existing)
-    }
-
-    for keyword, product_id in id_name_map.items():
-        print(f"========== {keyword} ==========")
-
-        for size, size_id in SIZE_SPECS_MAP.items():
-            price, url = fetch_min_price(keyword, size, size_id)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            values = [
-                product_id,
-                keyword,
-                size,
-                "YA",
-                price or 0,
-                url or "",
-                now,
-            ]
-
-            key = (product_id, size, "YA")
-            if key in row_map:
-                output_ws.update(
-                    f"A{row_map[key]}:G{row_map[key]}",
-                    [values],
-                    value_input_option="USER_ENTERED",
-                )
-                print(f"更新 {size} ¥{price}")
-            else:
-                output_ws.append_row(values, value_input_option="USER_ENTERED")
-                print(f"追加 {size} ¥{price}")
-
-            time.sleep(0.4)  # detail API連打防止
+        # ★ 27cm だけ検証
+        search_with_size_debug(keyword, "27cm", SIZE_SPECS_MAP["27cm"])
+        break  # 1キーワードで終了
 
 # ==================================================
 # 実行
