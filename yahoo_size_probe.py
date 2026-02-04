@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 import requests
 from urllib.parse import quote
@@ -19,13 +18,13 @@ UA = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# 27cm / 27.5cm / 28cm 形式のみ
+# 対象サイズ表記（cm固定）
 SIZE_PATTERN = re.compile(r"\b(2[3-9](?:\.5)?|3[0-2](?:\.5)?)cm\b")
 
 # ==================================================
 # search API
 # ==================================================
-def search_items(keyword, limit=10):
+def search_items(keyword, limit=30):
     params = {
         "query": keyword,
         "sort": "price",
@@ -45,9 +44,9 @@ def search_items(keyword, limit=10):
     return r.json().get("items", []) or []
 
 # ==================================================
-# 商品ページからサイズ抽出（失敗耐性あり）
+# 商品ページからサイズ抽出
 # ==================================================
-async def extract_sizes_from_item(browser, item_id):
+async def extract_sizes(browser, item_id):
     url = f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}"
     page = await browser.new_page()
 
@@ -60,11 +59,10 @@ async def extract_sizes_from_item(browser, item_id):
         text = soup.get_text(" ", strip=True)
 
         matches = SIZE_PATTERN.findall(text)
-        sizes = sorted(set(m + "cm" for m in matches))
-        return sizes
+        return sorted(set(m + "cm" for m in matches))
 
     except Exception as e:
-        print(f"[WARN] item page blocked or failed: {item_id} ({e})")
+        print(f"[WARN] page failed: {item_id} ({e})")
         return []
 
     finally:
@@ -78,24 +76,40 @@ async def run():
     keyword = 'Nike Air Jordan 1 Retro High OG "Yellow Ochre"'
     print(f"=== KEYWORD: {keyword} ===")
 
-    items = search_items(keyword, limit=10)
+    items = search_items(keyword, limit=30)
     print(f"search API items: {len(items)}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
 
+        results = []
+
         for item in items:
+            # --- 条件フィルタ（search API） ---
+            if item.get("itemStatus") != "OPEN":
+                continue
+            if item.get("condition") != "new":
+                continue
+
             item_id = item.get("id")
             title = item.get("title")
             price = item.get("price")
 
-            sizes = await extract_sizes_from_item(browser, item_id)
+            sizes = await extract_sizes(browser, item_id)
+            if not sizes:
+                continue  # サイズ取れない商品は除外
+
+            result = {
+                "id": item_id,
+                "title": title,
+                "price": price,
+                "sizes": sizes,
+                "url": f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}",
+            }
+            results.append(result)
 
             print("\n----------------------------")
             print("id   :", item_id)
@@ -104,6 +118,9 @@ async def run():
             print("sizes:", sizes)
 
         await browser.close()
+
+    print("\n=== FINAL RESULT COUNT ===")
+    print(len(results))
 
 # ==================================================
 # 実行
