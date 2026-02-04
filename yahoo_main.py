@@ -51,7 +51,7 @@ def is_on_sale(detail: dict) -> bool:
 
 
 def is_unused(detail: dict) -> bool:
-    return str(detail.get("condition")).lower() == "new"
+    return str(detail.get("condition")).lower() == "NEW"
 
 # ==================================================
 # サイズ指定 search → detail で最安取得
