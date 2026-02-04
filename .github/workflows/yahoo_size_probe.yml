@@ -1,0 +1,27 @@
+name: Yahoo Size Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 playwright
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
+
+      - name: Run size probe
+        run: |
+          python yahoo_size_probe.py
