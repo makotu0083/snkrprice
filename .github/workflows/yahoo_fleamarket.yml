@@ -7,7 +7,7 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04   # ★ 重要：22.04に固定
 
     steps:
       - name: Checkout
@@ -22,7 +22,7 @@ jobs:
         run: |
           pip install -r requirements.txt
           python -m playwright install chromium
-          python -m playwright install-deps
+          python -m playwright install-deps chromium
 
       - name: Run yahoo_main.py
         env:
