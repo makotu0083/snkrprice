@@ -49,7 +49,7 @@ def search_with_size_debug(keyword, size, size_id):
         "specs": f"C_{FACET_ID}:{size_id}",
         "open": 1,
         "page": 1,
-        "limit": 10,  # デバッグなので少なめ
+        "limit": 50,  # デバッグなので少なめ
     }
 
     headers = {
