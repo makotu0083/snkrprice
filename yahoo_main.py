@@ -38,18 +38,19 @@ gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
-# サイズ指定 search API デバッグ
+# サイズ指定 search API デバッグ（10商品分）
 # ==================================================
 def search_with_size_debug(keyword, size, size_id):
     params = {
         "query": keyword,
         "sort": "price",
         "order": "asc",
-        # ★ Web検索URLと同じ指定
+        # Web UI と同じ指定
         "specs": f"C_{FACET_ID}:{size_id}",
         "open": 1,
         "page": 1,
-        "limit": 50,  # デバッグなので少なめ
+        # ★ API側の最大取得数に合わせて多めに
+        "limit": 30,
     }
 
     headers = {
@@ -75,16 +76,25 @@ def search_with_size_debug(keyword, size, size_id):
         return
 
     items = data.get("items", []) or []
-    print("[DBG] items_len:", len(items))
+    print("[DBG] items_len (raw):", len(items))
 
     if not items:
         print("[DBG] items is EMPTY")
         return
 
-    # 先頭2件だけ中身を確認
-    for i, item in enumerate(items[:2]):
-        print(f"\n[DBG] raw item[{i}]:")
-        print(json.dumps(item, ensure_ascii=False, indent=2))
+    # ★ 先頭10件を明示的に確認
+    print("\n[DBG] ===== FIRST 10 ITEMS =====")
+    for i, item in enumerate(items[:10]):
+        print(f"\n[DBG] item[{i}] summary:")
+        print("  id         :", item.get("id"))
+        print("  title      :", item.get("title"))
+        print("  price      :", item.get("price"))
+        print("  itemStatus :", item.get("itemStatus"))
+        print("  condition  :", item.get("condition"))
+
+    # ★ 完全な raw JSON を1件だけ出す（構造確認用）
+    print("\n[DBG] ===== RAW ITEM[0] JSON =====")
+    print(json.dumps(items[0], ensure_ascii=False, indent=2))
 
 # ==================================================
 # メイン（1キーワード・27cmのみ）
@@ -100,8 +110,12 @@ def run():
 
         print(f"\n========== DEBUG TARGET: {keyword} ==========")
 
-        # ★ 27cm だけ検証
-        search_with_size_debug(keyword, "27cm", SIZE_SPECS_MAP["27cm"])
+        # ★ 27cm のみ検証
+        search_with_size_debug(
+            keyword,
+            "27cm",
+            SIZE_SPECS_MAP["27cm"],
+        )
         break  # 1キーワードで終了
 
 # ==================================================
