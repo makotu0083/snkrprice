@@ -1,4 +1,4 @@
-name: Yahoo Size Probe
+name: Yahoo Scraper
 
 on:
   # 手動実行も残す
@@ -37,4 +37,4 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
         run: |
-          python yahoo_size_probe.py
+          python yahoo_main.py
