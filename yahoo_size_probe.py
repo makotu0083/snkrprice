@@ -29,7 +29,7 @@ INPUT_SHEET_GID = 0
 OUTPUT_SHEET_GID = 1994370799
 
 HEADERS = ["ID", "NAME", "size", "site", "price", "url", "updated_at"]
-SITE_CODE = "YA"
+SITE_CODE = "Yahoo!フリマ"
 
 # keyword間クールダウン（必要に応じて調整）
 KEYWORD_SLEEP_SEC = 90
@@ -58,7 +58,7 @@ def normalize_size(size_with_cm: str) -> str:
 # ==================================================
 # search API
 # ==================================================
-def search_items(keyword, limit=50):
+def search_items(keyword, limit=80):
     params = {
         "query": keyword,
         "sort": "price",
