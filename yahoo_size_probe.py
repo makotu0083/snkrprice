@@ -3,6 +3,7 @@ import json
 import re
 import requests
 from urllib.parse import quote
+from math import inf
 
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
@@ -79,13 +80,14 @@ async def run():
     items = search_items(keyword, limit=30)
     print(f"search API items: {len(items)}")
 
+    # サイズごとの最安値マップ
+    size_min_map = {}
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
-
-        results = []
 
         for item in items:
             # --- 条件フィルタ（search API） ---
@@ -102,25 +104,38 @@ async def run():
             if not sizes:
                 continue  # サイズ取れない商品は除外
 
-            result = {
-                "id": item_id,
-                "title": title,
-                "price": price,
-                "sizes": sizes,
-                "url": f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}",
-            }
-            results.append(result)
-
             print("\n----------------------------")
             print("id   :", item_id)
             print("title:", title)
             print("price:", price)
             print("sizes:", sizes)
 
+            # --- サイズごとの最安値更新 ---
+            for size in sizes:
+                if size not in size_min_map or price < size_min_map[size]["price"]:
+                    size_min_map[size] = {
+                        "price": price,
+                        "id": item_id,
+                        "title": title,
+                        "url": f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}",
+                    }
+
         await browser.close()
 
-    print("\n=== FINAL RESULT COUNT ===")
-    print(len(results))
+    # ==================================================
+    # 結果表示（サイズ別最安値）
+    # ==================================================
+    print("\n=== SIZE MIN PRICE RESULT ===")
+    for size in sorted(size_min_map.keys(), key=lambda x: float(x.replace("cm", ""))):
+        data = size_min_map[size]
+        print(
+            f"{size}: ¥{data['price']:,} "
+            f"({data['id']})"
+        )
+
+    print("\n=== FINAL SIZE COUNT ===")
+    print(len(size_min_map))
+
 
 # ==================================================
 # 実行
