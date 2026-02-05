@@ -24,10 +24,12 @@ jobs:
             playwright \
             gspread \
             google-auth
-         python -m playwright install chromium
-         python -m playwright install-deps chromium
-
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
 
       - name: Run size probe
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
         run: |
           python yahoo_size_probe.py
