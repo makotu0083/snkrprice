@@ -18,9 +18,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 playwright
-          python -m playwright install chromium
-          python -m playwright install-deps chromium
+          pip install \
+            requests \
+            beautifulsoup4 \
+            playwright \
+            gspread \
+            google-auth
+         python -m playwright install chromium
+         python -m playwright install-deps chromium
+
 
       - name: Run size probe
         run: |
