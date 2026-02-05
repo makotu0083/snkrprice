@@ -2,11 +2,14 @@ import asyncio
 import json
 import re
 import requests
-from urllib.parse import quote
 from math import inf
 
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
+
+import gspread
+from google.oauth2.service_account import Credentials
+import os
 
 # ==================================================
 # 定数
@@ -21,6 +24,19 @@ UA = (
 
 # 対象サイズ表記（cm固定）
 SIZE_PATTERN = re.compile(r"\b(2[3-9](?:\.5)?|3[0-2](?:\.5)?)cm\b")
+
+INPUT_SHEET_GID = 0  # NAME があるシート
+
+# ==================================================
+# Google Sheets 認証
+# ==================================================
+creds_dict = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+creds = Credentials.from_service_account_info(
+    creds_dict,
+    scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+)
+gc = gspread.authorize(creds)
+SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
 # search API
@@ -71,17 +87,23 @@ async def extract_sizes(browser, item_id):
         await asyncio.sleep(0.3)
 
 # ==================================================
+# Sheets から keyword 一覧取得
+# ==================================================
+def load_keywords_from_sheet():
+    ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
+
+    # B列（NAME）を取得、1行目はヘッダなので除外
+    names = ws.col_values(2)[1:]
+    keywords = [n.strip() for n in names if n.strip()]
+
+    print(f"[INFO] Loaded {len(keywords)} keywords from sheet")
+    return keywords
+
+# ==================================================
 # メイン
 # ==================================================
 async def run():
-    keyword = 'Nike Air Jordan 1 Retro High OG "Yellow Ochre"'
-    print(f"=== KEYWORD: {keyword} ===")
-
-    items = search_items(keyword, limit=30)
-    print(f"search API items: {len(items)}")
-
-    # サイズごとの最安値マップ
-    size_min_map = {}
+    keywords = load_keywords_from_sheet()
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -89,53 +111,58 @@ async def run():
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
 
-        for item in items:
-            # --- 条件フィルタ（search API） ---
-            if item.get("itemStatus") != "OPEN":
-                continue
-            if item.get("condition") != "new":
-                continue
+        for keyword in keywords:
+            print("\n========================================")
+            print(f"=== KEYWORD: {keyword} ===")
 
-            item_id = item.get("id")
-            title = item.get("title")
-            price = item.get("price")
+            items = search_items(keyword, limit=30)
+            print(f"search API items: {len(items)}")
 
-            sizes = await extract_sizes(browser, item_id)
-            if not sizes:
-                continue  # サイズ取れない商品は除外
+            # サイズごとの最安値
+            size_min_map = {}
 
-            print("\n----------------------------")
-            print("id   :", item_id)
-            print("title:", title)
-            print("price:", price)
-            print("sizes:", sizes)
+            for item in items:
+                # --- 条件フィルタ（search API） ---
+                if item.get("itemStatus") != "OPEN":
+                    continue
+                if item.get("condition") != "new":
+                    continue
 
-            # --- サイズごとの最安値更新 ---
-            for size in sizes:
-                if size not in size_min_map or price < size_min_map[size]["price"]:
-                    size_min_map[size] = {
-                        "price": price,
-                        "id": item_id,
-                        "title": title,
-                        "url": f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}",
-                    }
+                item_id = item.get("id")
+                title = item.get("title")
+                price = item.get("price")
+
+                sizes = await extract_sizes(browser, item_id)
+                if not sizes:
+                    continue
+
+                print("\n----------------------------")
+                print("id   :", item_id)
+                print("title:", title)
+                print("price:", price)
+                print("sizes:", sizes)
+
+                for size in sizes:
+                    if size not in size_min_map or price < size_min_map[size]["price"]:
+                        size_min_map[size] = {
+                            "price": price,
+                            "id": item_id,
+                            "title": title,
+                            "url": f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}",
+                        }
+
+            # --- keyword ごとの最終結果 ---
+            print("\n=== SIZE MIN PRICE RESULT ===")
+            for size in sorted(size_min_map.keys(), key=lambda x: float(x.replace("cm", ""))):
+                data = size_min_map[size]
+                print(
+                    f"{size}: ¥{data['price']:,} "
+                    f"({data['id']})"
+                )
+
+            print("=== SIZE COUNT ===", len(size_min_map))
 
         await browser.close()
-
-    # ==================================================
-    # 結果表示（サイズ別最安値）
-    # ==================================================
-    print("\n=== SIZE MIN PRICE RESULT ===")
-    for size in sorted(size_min_map.keys(), key=lambda x: float(x.replace("cm", ""))):
-        data = size_min_map[size]
-        print(
-            f"{size}: ¥{data['price']:,} "
-            f"({data['id']})"
-        )
-
-    print("\n=== FINAL SIZE COUNT ===")
-    print(len(size_min_map))
-
 
 # ==================================================
 # 実行
