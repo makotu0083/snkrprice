@@ -2,7 +2,9 @@ import requests
 import json
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime
 import os
+import time
 
 # ==================================================
 # 定数
@@ -16,9 +18,15 @@ SIZE_SPECS_MAP = {
 }
 
 FACET_ID = 27435
+
 SEARCH_API = "https://paypayfleamarket.yahoo.co.jp/api/v1/search"
+DETAIL_API = "https://paypayfleamarket.yahoo.co.jp/api/v1/item/{}"
 
 INPUT_SHEET_GID = 0
+OUTPUT_SHEET_GID = 1994370799
+
+HEADERS = ["ID", "NAME", "size", "site", "price", "url", "updated_at"]
+SITE_NAME = "Yahoo!フリマ"
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -27,7 +35,7 @@ UA = (
 )
 
 # ==================================================
-# Google Sheets 認証（キーワード取得のみ）
+# Google Sheets 認証
 # ==================================================
 creds_dict = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 creds = Credentials.from_service_account_info(
@@ -38,85 +46,168 @@ gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
-# サイズ指定 search API デバッグ（10商品分）
+# 判定関数（detail API 用）
 # ==================================================
-def search_with_size_debug(keyword, size, size_id):
+def is_on_sale(detail: dict) -> bool:
+    if detail.get("itemStatus") == "OPEN":
+        return True
+    if detail.get("isSoldOut") is False:
+        return True
+    return False
+
+
+def is_unused(detail: dict) -> bool:
+    cond = str(detail.get("condition") or "").lower()
+    return cond.startswith("new") or "unused" in cond or "未使用" in cond
+
+
+def has_size(detail: dict, size_value_id: int) -> bool:
+    specs = detail.get("specs") or []
+    for sp in specs:
+        if sp.get("facetId") == FACET_ID and sp.get("valueId") == size_value_id:
+            return True
+    return False
+
+# ==================================================
+# search → detail でサイズ別最安取得
+# ==================================================
+def fetch_min_price(keyword, size, size_id):
+    # --- Step1: search API ---
     params = {
         "query": keyword,
         "sort": "price",
         "order": "asc",
-        # Web UI と同じ指定
-        "specs": f"C_{FACET_ID}:{size_id}",
-        "open": 1,
         "page": 1,
-        # ★ API側の最大取得数に合わせて多めに
-        "limit": 30,
+        "limit": 50,
     }
 
     headers = {
         "User-Agent": UA,
         "Accept": "application/json",
-        "Accept-Language": "ja-JP,ja;q=0.9",
         "Referer": "https://paypayfleamarket.yahoo.co.jp/",
     }
 
     r = requests.get(SEARCH_API, params=params, headers=headers, timeout=20)
+    if r.status_code != 200:
+        return None, None
 
-    print("\n[DBG] ===== SIZE SEARCH DEBUG =====")
-    print("[DBG] keyword:", keyword)
-    print("[DBG] size:", size)
-    print("[DBG] request_url:", r.url)
-    print("[DBG] status:", r.status_code)
+    items = r.json().get("items", []) or []
 
-    try:
-        data = r.json()
-    except Exception as e:
-        print("[DBG] JSON decode error:", e)
-        print("[DBG] raw text:", r.text[:500])
-        return
+    # --- Step2: detail API ---
+    for item in items:
+        item_id = item.get("id")
+        if not item_id:
+            continue
 
-    items = data.get("items", []) or []
-    print("[DBG] items_len (raw):", len(items))
+        dr = requests.get(
+            DETAIL_API.format(item_id),
+            headers=headers,
+            timeout=20,
+        )
+        if dr.status_code != 200:
+            continue
 
-    if not items:
-        print("[DBG] items is EMPTY")
-        return
+        detail = dr.json()
 
-    # ★ 先頭10件を明示的に確認
-    print("\n[DBG] ===== FIRST 10 ITEMS =====")
-    for i, item in enumerate(items[:10]):
-        print(f"\n[DBG] item[{i}] summary:")
-        print("  id         :", item.get("id"))
-        print("  title      :", item.get("title"))
-        print("  price      :", item.get("price"))
-        print("  itemStatus :", item.get("itemStatus"))
-        print("  condition  :", item.get("condition"))
+        if not is_on_sale(detail):
+            continue
+        if not is_unused(detail):
+            continue
+        if not has_size(detail, size_id):
+            continue
 
-    # ★ 完全な raw JSON を1件だけ出す（構造確認用）
-    print("\n[DBG] ===== RAW ITEM[0] JSON =====")
-    print(json.dumps(items[0], ensure_ascii=False, indent=2))
+        price = detail.get("price")
+        if price is None:
+            continue
+
+        url = f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}"
+        return price, url
+
+    return None, None
 
 # ==================================================
-# メイン（1キーワード・27cmのみ）
+# メイン処理
 # ==================================================
 def run():
     input_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
-    rows = input_ws.get_all_records()
+    output_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(OUTPUT_SHEET_GID)
 
-    for row in rows:
-        keyword = row.get("NAME")
-        if not keyword:
-            continue
+    # 入力：商品ID / NAME
+    input_rows = input_ws.get_all_records()
+    id_name_map = {
+        row["NAME"]: row["ID"]
+        for row in input_rows
+        if row.get("ID") and row.get("NAME")
+    }
 
-        print(f"\n========== DEBUG TARGET: {keyword} ==========")
+    # 出力シート初期化
+    values = output_ws.get_all_values()
+    if not values:
+        output_ws.append_row(HEADERS)
+        existing = []
+    elif len(values) == 1:
+        existing = []
+    else:
+        existing = output_ws.get_all_records()
 
-        # ★ 27cm のみ検証
-        search_with_size_debug(
-            keyword,
-            "27cm",
-            SIZE_SPECS_MAP["27cm"],
-        )
-        break  # 1キーワードで終了
+    # 既存行マップ（行番号・price・url）
+    row_map = {}
+    for idx, r in enumerate(existing, start=2):
+        key = (r["ID"], r["size"], r["site"])
+        row_map[key] = {
+            "row": idx,
+            "price": r.get("price"),
+            "url": r.get("url"),
+        }
+
+    # メインループ
+    for keyword, product_id in id_name_map.items():
+        print(f"=== KEYWORD: {keyword} ===")
+
+        for size, size_id in SIZE_SPECS_MAP.items():
+            price, url = fetch_min_price(keyword, size, size_id)
+
+            # 該当商品なし
+            if price is None or url is None:
+                price = 0
+                url = ""
+
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            values = [
+                product_id,
+                keyword,
+                size,
+                SITE_NAME,
+                price,
+                url,
+                now,
+            ]
+
+            key = (product_id, size, SITE_NAME)
+
+            # --- 既存行 ---
+            if key in row_map:
+                prev = row_map[key]
+
+                # 商品ID（URL）と価格が同一 → 更新しない
+                if prev["price"] == price and prev["url"] == url:
+                    print(f"スキップ {size}（同一商品・同一価格）")
+                    continue
+
+                output_ws.update(
+                    f"A{prev['row']}:G{prev['row']}",
+                    [values],
+                    value_input_option="USER_ENTERED",
+                )
+                print(f"更新 {size} ¥{price}")
+
+            # --- 新規行 ---
+            else:
+                output_ws.append_row(values, value_input_option="USER_ENTERED")
+                print(f"追加 {size} ¥{price}")
+
+            # detail API 連打防止
+            time.sleep(0.4)
 
 # ==================================================
 # 実行
