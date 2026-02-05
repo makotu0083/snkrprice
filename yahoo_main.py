@@ -5,7 +5,6 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 import os
 import time
-from math import inf
 
 # ==================================================
 # 定数
@@ -46,7 +45,7 @@ gc = gspread.authorize(creds)
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
-# detail API 判定
+# 判定系（detail API 専用）
 # ==================================================
 def is_on_sale(detail: dict) -> bool:
     if detail.get("itemStatus") == "OPEN":
@@ -61,45 +60,20 @@ def is_unused(detail: dict) -> bool:
     return cond.startswith("new") or "unused" in cond or "未使用" in cond
 
 
-def extract_sizes(detail: dict) -> list[str]:
-    """
-    detail API から ['27cm', '28cm'] のようなサイズ配列を抽出
-    """
-    sizes = []
+def has_size(detail: dict, size_value_id: int) -> bool:
     specs = detail.get("specs") or []
-
     for sp in specs:
-        if sp.get("facetId") == FACET_ID:
-            label = sp.get("valueLabel")
-            if label:
-                sizes.append(label)
-
-    return sizes
-
+        fid = sp.get("facetId")
+        vid = sp.get("valueId")
+        if fid == FACET_ID and vid == size_value_id:
+            return True
+    return False
 
 # ==================================================
-# search → detail → サイズ別最安値算出
+# search → detail で最安取得
 # ==================================================
-def fetch_size_min_prices(keyword: str) -> dict:
-    """
-    return:
-      {
-        '27cm': {'price': 16800, 'id': 'xxx', 'url': '...', 'title': '...'},
-        ...
-      }
-    """
-    # 初期化
-    size_min_map = {
-        size: {
-            "price": inf,
-            "id": None,
-            "url": None,
-            "title": None,
-        }
-        for size in SIZE_SPECS_MAP.keys()
-    }
-
-    # --- search API ---
+def fetch_min_price(keyword, size, size_id):
+    # --- Step1: search API ---
     params = {
         "query": keyword,
         "sort": "price",
@@ -116,11 +90,11 @@ def fetch_size_min_prices(keyword: str) -> dict:
 
     r = requests.get(SEARCH_API, params=params, headers=headers, timeout=20)
     if r.status_code != 200:
-        return size_min_map
+        return None, None
 
     items = r.json().get("items", []) or []
 
-    # --- detail API ---
+    # --- Step2: detail API ---
     for item in items:
         item_id = item.get("id")
         if not item_id:
@@ -140,36 +114,20 @@ def fetch_size_min_prices(keyword: str) -> dict:
             continue
         if not is_unused(detail):
             continue
+        if not has_size(detail, size_id):
+            continue
 
         price = detail.get("price")
         if price is None:
             continue
 
-        sizes = extract_sizes(detail)
-        if not sizes:
-            continue
+        url = f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}"
+        return price, url
 
-        title = detail.get("title")
-
-        for size in sizes:
-            if size not in size_min_map:
-                continue
-
-            if price < size_min_map[size]["price"]:
-                size_min_map[size] = {
-                    "price": price,
-                    "id": item_id,
-                    "url": f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}",
-                    "title": title,
-                }
-
-        time.sleep(0.2)  # detail API 叩きすぎ防止
-
-    return size_min_map
-
+    return None, None
 
 # ==================================================
-# メイン処理（Sheets反映）
+# メイン処理
 # ==================================================
 def run():
     input_ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
@@ -197,14 +155,10 @@ def run():
     }
 
     for keyword, product_id in id_name_map.items():
-        print(f"\n=== KEYWORD: {keyword} ===")
+        print(f"========== {keyword} ==========")
 
-        size_min_map = fetch_size_min_prices(keyword)
-
-        for size, data in size_min_map.items():
-            price = data["price"]
-            url = data["url"]
-
+        for size, size_id in SIZE_SPECS_MAP.items():
+            price, url = fetch_min_price(keyword, size, size_id)
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             values = [
@@ -212,8 +166,8 @@ def run():
                 keyword,
                 size,
                 "YA",
-                0 if price == inf else price,
-                "" if price == inf else url,
+                price or 0,
+                url or "",
                 now,
             ]
 
@@ -224,13 +178,12 @@ def run():
                     [values],
                     value_input_option="USER_ENTERED",
                 )
+                print(f"更新 {size} ¥{price}")
             else:
                 output_ws.append_row(values, value_input_option="USER_ENTERED")
+                print(f"追加 {size} ¥{price}")
 
-            print(
-                f"{size}: "
-                + ("該当なし" if price == inf else f"¥{price:,}")
-            )
+            time.sleep(0.4)  # detail API連打防止
 
 # ==================================================
 # 実行
