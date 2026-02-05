@@ -3,7 +3,6 @@ import json
 import re
 import requests
 import os
-import time
 
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
@@ -22,7 +21,7 @@ UA = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# サイズ抽出（※現行ロジック維持）
+# サイズ抽出（現行ロジック維持）
 SIZE_PATTERN = re.compile(r"\b(2[3-9](?:\.5)?|3[0-2](?:\.5)?)cm\b")
 
 INPUT_SHEET_GID = 0  # B列 NAME
@@ -61,30 +60,41 @@ def search_items(keyword, limit=50):
     return r.json().get("items", []) or []
 
 # ==================================================
-# 商品ページからサイズ抽出
+# 商品ページからサイズ抽出（安定化版）
 # ==================================================
 async def extract_sizes(page, item_id):
     url = f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}"
 
-    try:
-        await page.goto(url, timeout=30000)
-        await page.wait_for_load_state("domcontentloaded")
+    for attempt in (1, 2):
+        try:
+            await page.goto(url, timeout=30000)
+            await page.wait_for_load_state("networkidle")
 
-        html = await page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        text = soup.get_text(" ", strip=True)
+            # ★ 人間的な待機（超重要）
+            await asyncio.sleep(1.5)
 
-        # --- Botブロック検知 ---
-        if len(text) < 500:
-            print(f"[WARN] page content too small (possible block): {item_id}")
-            return []
+            html = await page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text(" ", strip=True)
 
-        matches = SIZE_PATTERN.findall(text)
-        return sorted(set(m + "cm" for m in matches))
+            # Botブロック検知
+            if len(text) < 500:
+                raise ValueError("page content too small")
 
-    except Exception as e:
-        print(f"[WARN] page failed: {item_id} ({e})")
-        return []
+            matches = SIZE_PATTERN.findall(text)
+            return sorted(set(m + "cm" for m in matches))
+
+        except Exception:
+            if attempt == 1:
+                print(f"[WARN] retry item page: {item_id}")
+                await asyncio.sleep(5)
+            else:
+                print(f"[WARN] page blocked: {item_id}")
+                return []
+
+        finally:
+            # ★ 商品ごとのクールダウン
+            await asyncio.sleep(1.0)
 
 # ==================================================
 # Sheets から keyword 取得
@@ -161,9 +171,9 @@ async def run():
 
         print("=== SIZE COUNT ===", len(size_min_map))
 
-        # ★ 安定化のためのクールダウン
-        print("[INFO] keyword completed → sleep 60s")
-        await asyncio.sleep(60)
+        # ★ keyword ごとのクールダウン
+        print("[INFO] keyword completed → sleep 90s")
+        await asyncio.sleep(90)
 
 # ==================================================
 # 実行
