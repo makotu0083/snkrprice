@@ -1,4 +1,4 @@
-name: Mercari Scraper (Scheduled)
+name: Mercari Scraper3 (Scheduled)
 
 on:
   # 手動実行（テスト用）
