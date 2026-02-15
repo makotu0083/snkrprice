@@ -36,11 +36,14 @@ KEYWORD_SLEEP_SEC = 90
 # Google Sheets 認証
 # ==================================================
 creds_dict = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+
 creds = Credentials.from_service_account_info(
     creds_dict,
     scopes=["https://www.googleapis.com/auth/spreadsheets"],
 )
+
 gc = gspread.authorize(creds)
+
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # ==================================================
@@ -207,6 +210,9 @@ async def run():
 
     output_ws, row_map, existing_sizes_map, last_row = prepare_output_sheet()
 
+    # ★追加（最小修正）
+    all_batch_updates = []
+
     for keyword, product_id_raw in id_name_map.items():
 
         product_id = str(product_id_raw).strip()
@@ -273,86 +279,75 @@ async def run():
 
         target_sizes = set(existing_sizes) | set(size_min_map.keys())
 
-        if not target_sizes:
+        batch_updates = []
 
-            print("[INFO] no size")
+        for size in sorted(target_sizes, key=lambda x: float(x)):
 
-        else:
+            if size in size_min_map:
 
-            batch_updates = []
+                price = size_min_map[size]["price"]
 
-            for size in sorted(target_sizes, key=lambda x: float(x)):
+                url = size_min_map[size]["url"]
 
-                if size in size_min_map:
+            else:
 
-                    price = size_min_map[size]["price"]
+                price = 0
 
-                    url = size_min_map[size]["url"]
+                url = ""
 
-                else:
+            values = [
+                product_id,
+                keyword,
+                size,
+                SITE_CODE,
+                price,
+                url,
+                now,
+            ]
 
-                    price = 0
+            key = (product_id, size, SITE_CODE)
 
-                    url = ""
+            if key in row_map:
 
-                values = [
+                row = row_map[key]
 
-                    product_id,
+            else:
 
-                    keyword,
+                last_row += 1
 
-                    size,
+                row = last_row
 
-                    SITE_CODE,
+                row_map[key] = row
 
-                    price,
+                existing_sizes_map.setdefault(
+                    (product_id, SITE_CODE),
+                    set()
+                ).add(size)
 
-                    url,
+            batch_updates.append({
 
-                    now,
-                ]
+                "range": f"A{row}:G{row}",
 
-                key = (product_id, size, SITE_CODE)
+                "values": [values]
 
-                if key in row_map:
+            })
 
-                    row = row_map[key]
+            print(f"更新 size={size} price={price}")
 
-                else:
-
-                    last_row += 1
-
-                    row = last_row
-
-                    row_map[key] = row
-
-                    existing_sizes_map.setdefault(
-                        (product_id, SITE_CODE),
-                        set()
-                    ).add(size)
-
-                batch_updates.append({
-
-                    "range": f"A{row}:G{row}",
-
-                    "values": [values]
-
-                })
-
-                print(f"更新 size={size} price={price}")
-
-            # ★Quota完全回避：1回のみAPI書き込み
-            output_ws.batch_update(
-
-                batch_updates,
-
-                value_input_option="USER_ENTERED"
-
-            )
+        # ★変更（最小修正）
+        all_batch_updates.extend(batch_updates)
 
         print(f"[INFO] sleep {KEYWORD_SLEEP_SEC}s")
 
         await asyncio.sleep(KEYWORD_SLEEP_SEC)
+
+    # ★追加（最小修正）
+    if all_batch_updates:
+
+        output_ws.batch_update(
+            all_batch_updates,
+            value_input_option="USER_ENTERED"
+        )
 
 # ==================================================
 # start
