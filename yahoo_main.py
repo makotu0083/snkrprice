@@ -22,7 +22,6 @@ UA = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# サイズ抽出（現行ロジック維持）
 SIZE_PATTERN = re.compile(r"\b(2[3-9](?:\.5)?|3[0-2](?:\.5)?)cm\b")
 
 INPUT_SHEET_GID = 0
@@ -31,7 +30,6 @@ OUTPUT_SHEET_GID = 1994370799
 HEADERS = ["ID", "NAME", "size", "site", "price", "url", "updated_at"]
 SITE_CODE = "Yahoo!フリマ"
 
-# keyword間クールダウン（必要に応じて調整）
 KEYWORD_SLEEP_SEC = 90
 
 # ==================================================
@@ -48,17 +46,14 @@ SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 # ==================================================
 # Utility
 # ==================================================
-def normalize_size(size_with_cm: str) -> str:
-    """
-    '27cm' -> '27'
-    '27.5cm' -> '27.5'
-    """
+def normalize_size(size_with_cm: str):
     return size_with_cm.replace("cm", "").strip()
 
 # ==================================================
 # search API
 # ==================================================
 def search_items(keyword, limit=80):
+
     params = {
         "query": keyword,
         "sort": "price",
@@ -66,200 +61,302 @@ def search_items(keyword, limit=80):
         "page": 1,
         "limit": limit,
     }
+
     headers = {
         "User-Agent": UA,
         "Accept": "application/json",
         "Referer": "https://paypayfleamarket.yahoo.co.jp/",
     }
-    r = requests.get(SEARCH_API, params=params, headers=headers, timeout=20)
+
+    r = requests.get(
+        SEARCH_API,
+        params=params,
+        headers=headers,
+        timeout=20
+    )
+
     r.raise_for_status()
+
     return r.json().get("items", []) or []
 
 # ==================================================
-# 商品ページからサイズ抽出（安定化版）
+# extract size
 # ==================================================
 async def extract_sizes(page, item_id):
+
     url = f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}"
 
     for attempt in (1, 2):
+
         try:
+
             await page.goto(url, timeout=30000)
+
             await page.wait_for_load_state("networkidle")
+
             await asyncio.sleep(1.5)
 
             html = await page.content()
+
             soup = BeautifulSoup(html, "html.parser")
+
             text = soup.get_text(" ", strip=True)
 
-            # Botブロック検知
             if len(text) < 500:
-                raise ValueError("page content too small")
+                raise Exception("blocked")
 
-            matches = SIZE_PATTERN.findall(text)  # '27' or '27.5'
-            # ここでは従来通り cm を付けて返す（後段で normalize）
+            matches = SIZE_PATTERN.findall(text)
+
             return sorted(set(m + "cm" for m in matches))
 
-        except Exception:
+        except:
+
             if attempt == 1:
+
                 print(f"[WARN] retry page: {item_id}")
+
                 await asyncio.sleep(5)
+
             else:
+
                 print(f"[WARN] blocked: {item_id}")
+
                 return []
 
         finally:
-            await asyncio.sleep(1.0)
+
+            await asyncio.sleep(1)
 
 # ==================================================
-# Sheets utility
+# sheet utils
 # ==================================================
 def load_input_products():
-    ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(INPUT_SHEET_GID)
+
+    ws = gc.open_by_url(
+        SPREADSHEET_URL
+    ).get_worksheet_by_id(INPUT_SHEET_GID)
+
     rows = ws.get_all_records()
-    # NAME -> ID
-    return {row["NAME"]: row["ID"] for row in rows if row.get("ID") and row.get("NAME")}
+
+    return {
+        row["NAME"]: row["ID"]
+        for row in rows
+        if row.get("ID") and row.get("NAME")
+    }
 
 def prepare_output_sheet():
-    ws = gc.open_by_url(SPREADSHEET_URL).get_worksheet_by_id(OUTPUT_SHEET_GID)
+
+    ws = gc.open_by_url(
+        SPREADSHEET_URL
+    ).get_worksheet_by_id(OUTPUT_SHEET_GID)
 
     all_values = ws.get_all_values()
+
     if not all_values:
+
         ws.append_row(HEADERS)
+
         existing = []
+
         last_row = 1
+
     elif len(all_values) == 1:
-        # ヘッダのみ
+
         existing = []
+
         last_row = 1
+
     else:
+
         existing = ws.get_all_records()
+
         last_row = len(all_values)
 
-    # (ID, size, site) -> row_number
     row_map = {}
-    # (ID, site) -> set(sizes)
+
     existing_sizes_map = {}
 
     for idx, r in enumerate(existing, start=2):
+
         pid = str(r.get("ID", "")).strip()
-        size = str(r.get("size", "")).strip()  # 既存は '27' でも '27cm' でも来る可能性
-        size = normalize_size(size) if size else ""
+
+        size = normalize_size(
+            str(r.get("size", "")).strip()
+        )
+
         site = str(r.get("site", "")).strip()
 
         if not pid or not size or not site:
             continue
 
         row_map[(pid, size, site)] = idx
-        existing_sizes_map.setdefault((pid, site), set()).add(size)
+
+        existing_sizes_map.setdefault(
+            (pid, site),
+            set()
+        ).add(size)
 
     return ws, row_map, existing_sizes_map, last_row
 
 # ==================================================
-# メイン
+# main
 # ==================================================
 async def run():
+
     id_name_map = load_input_products()
+
     output_ws, row_map, existing_sizes_map, last_row = prepare_output_sheet()
 
     for keyword, product_id_raw in id_name_map.items():
+
         product_id = str(product_id_raw).strip()
+
         print(f"\n=== KEYWORD: {keyword} ===")
 
         async with async_playwright() as p:
+
             browser = await p.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
+
             page = await browser.new_page()
 
             items = search_items(keyword)
-            size_min_map = {}  # size(no cm) -> {"price": int, "url": str}
+
+            size_min_map = {}
 
             for item in items:
-                # --- search API 側の高速フィルタ（要件通り） ---
+
                 if item.get("itemStatus") != "OPEN":
                     continue
+
                 if item.get("condition") != "new":
                     continue
 
                 item_id = item.get("id")
+
                 price = item.get("price")
+
                 if not item_id or price is None:
                     continue
 
                 sizes = await extract_sizes(page, item_id)
+
                 if not sizes:
                     continue
 
-                # サイズの正規化（cm を外す）
-                norm_sizes = [normalize_size(s) for s in sizes if s]
+                for s in sizes:
 
-                for size in norm_sizes:
-                    if not size:
-                        continue
-                    if size not in size_min_map or price < size_min_map[size]["price"]:
+                    size = normalize_size(s)
+
+                    if (
+                        size not in size_min_map
+                        or price < size_min_map[size]["price"]
+                    ):
+
                         size_min_map[size] = {
+
                             "price": int(price),
+
                             "url": f"https://paypayfleamarket.yahoo.co.jp/item/{item_id}",
                         }
 
             await browser.close()
 
-        # ==================================================
-        # 書き戻し仕様
-        #  - 今回取れたサイズ → price/url で更新 or 追加
-        #  - 既存行があるサイズで今回取れなかった → price=0, url="" に更新
-        # ==================================================
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        existing_sizes = existing_sizes_map.get((product_id, SITE_CODE), set())
+        existing_sizes = existing_sizes_map.get(
+            (product_id, SITE_CODE),
+            set()
+        )
+
         target_sizes = set(existing_sizes) | set(size_min_map.keys())
 
-        # 既存サイズがない & 今回も0件なら何も書かない（無駄更新しない）
         if not target_sizes:
-            print("[INFO] no size to write (no existing rows and no new results)")
+
+            print("[INFO] no size")
+
         else:
+
+            batch_updates = []
+
             for size in sorted(target_sizes, key=lambda x: float(x)):
+
                 if size in size_min_map:
+
                     price = size_min_map[size]["price"]
+
                     url = size_min_map[size]["url"]
+
                 else:
-                    # ★要件②：既存があるが今回取れない場合は 0 / 空
+
                     price = 0
+
                     url = ""
 
                 values = [
+
                     product_id,
+
                     keyword,
-                    size,         # ★要件①：cm なしで出力
+
+                    size,
+
                     SITE_CODE,
+
                     price,
+
                     url,
+
                     now,
                 ]
 
                 key = (product_id, size, SITE_CODE)
 
                 if key in row_map:
-                    output_ws.update(
-                        range_name=f"A{row_map[key]}:G{row_map[key]}",
-                        values=[values],
-                        value_input_option="USER_ENTERED",
-                    )
-                    print(f"更新 size={size} price={price}")
-                else:
-                    # 追加
-                    output_ws.append_row(values, value_input_option="USER_ENTERED")
-                    last_row += 1
-                    row_map[key] = last_row
-                    existing_sizes_map.setdefault((product_id, SITE_CODE), set()).add(size)
-                    print(f"追加 size={size} price={price}")
 
-        print(f"[INFO] keyword done → sleep {KEYWORD_SLEEP_SEC}s")
+                    row = row_map[key]
+
+                else:
+
+                    last_row += 1
+
+                    row = last_row
+
+                    row_map[key] = row
+
+                    existing_sizes_map.setdefault(
+                        (product_id, SITE_CODE),
+                        set()
+                    ).add(size)
+
+                batch_updates.append({
+
+                    "range": f"A{row}:G{row}",
+
+                    "values": [values]
+
+                })
+
+                print(f"更新 size={size} price={price}")
+
+            # ★Quota完全回避：1回のみAPI書き込み
+            output_ws.batch_update(
+
+                batch_updates,
+
+                value_input_option="USER_ENTERED"
+
+            )
+
+        print(f"[INFO] sleep {KEYWORD_SLEEP_SEC}s")
+
         await asyncio.sleep(KEYWORD_SLEEP_SEC)
 
 # ==================================================
-# 実行
+# start
 # ==================================================
 if __name__ == "__main__":
+
     asyncio.run(run())
