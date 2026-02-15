@@ -7,7 +7,7 @@ on:
   # 定期実行（cron）
   schedule:
     # 6時間に1回、9時、15時、21時、3時
-    - cron: "0 */6 * * *"
+    - cron: "0 15,19,23,3,7,11 * * *"
 
 jobs:
   scrape:
@@ -39,4 +39,4 @@ jobs:
           INPUT_GID: "0"
           OUTPUT_GID: "208209208"
         run: |
-          python main.py
+          python mercari1_main.py
