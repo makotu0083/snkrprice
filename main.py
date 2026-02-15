@@ -278,7 +278,7 @@ async def main():
 
     targets = [
         r for r in rows
-        if str(r.get("update", "")).strip() == "2"
+        if str(r.get("update", "")).strip() == "1"
     ]
 
 
