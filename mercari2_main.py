@@ -7,6 +7,7 @@
 #  - URL に afid を付与
 #  - ID+SIZE単位で上書き
 #  - 取得できなかったサイズは price=0 で上書き
+#  - 画像・CSS・フォント読み込み停止（高速化）
 # =========================================================
 
 import os
@@ -285,9 +286,6 @@ async def main():
     print(f"[INFO] update=1 targets: {len(targets)}")
 
 
-    # ===============================
-    # 既存データ取得（ID,SIZE単位でmap化）
-    # ===============================
     existing = output_ws.get_all_values()
 
     if existing:
@@ -335,6 +333,16 @@ async def main():
         )
 
         page = await browser.new_page()
+
+        # ===============================
+        # ★追加：画像・CSS・フォント停止（最小修正）
+        # ===============================
+        await page.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ["image", "stylesheet", "font"]
+            else route.continue_()
+        )
 
 
         for r in targets:
@@ -401,9 +409,6 @@ async def main():
         await browser.close()
 
 
-    # ===============================
-    # シートへ反映（最後に1回だけclear）
-    # ===============================
     new_body = list(existing_map.values())
 
     output_ws.clear()
